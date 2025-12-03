@@ -4,6 +4,7 @@ from tkinter import ttk
 from threading import Thread
 import math
 from PIL import Image, ImageTk
+import queue
 
 
 class tkPDFViewer(tk.Frame):
@@ -20,10 +21,8 @@ class tkPDFViewer(tk.Frame):
             master (tk.Tk or tk.Frame): The parent Tkinter widget.
             pdf_location (str): The file path to the PDF document.
             show_loading_bar (bool): If True, a progress bar and message are shown during loading.
-            dpi (int): Dots per inch for rendering PDF pages. Higher DPI means better quality
-                       but more memory usage.
-            **kwargs: Arbitrary keyword arguments to pass to the tk.Frame constructor
-                      (e.g., bg, bd, relief).
+            dpi (int): Dots per inch for rendering PDF pages.
+            **kwargs: Arbitrary keyword arguments to pass to the tk.Frame constructor.
         """
         super().__init__(master, **kwargs)
         
@@ -41,14 +40,11 @@ class tkPDFViewer(tk.Frame):
         self.percentage_load_var = tk.StringVar()
         self.display_msg_label = None
         self.loading_progressbar = None
-        
+        self.image_queue = queue.Queue()
         self._setup_ui()
     
     def _setup_ui(self):
-        """
-        Sets up the internal Tkinter UI components for displaying the PDF.
-        This method is called during initialization of the tkPDFViewer instance.
-        """
+        """Sets up the internal Tkinter UI components for displaying the PDF."""
         self.scroll_y = ttk.Scrollbar(self, orient="vertical")
         self.scroll_x = ttk.Scrollbar(self, orient="horizontal")
         
@@ -70,20 +66,20 @@ class tkPDFViewer(tk.Frame):
         self.scroll_y.config(command=self.text.yview)
         
         if self.pdf_location:
-            self._start_pdf_loading_thread()
+            self._load_pdf_pages()
     
     def display_pdf(self, pdf_location):
+        """Loads and displays a new PDF file."""
         self.pdf_location = pdf_location
-        self._start_pdf_loading_thread()
-    
-    def _start_pdf_loading_thread(self):
-        Thread(target=self._load_pdf_pages, daemon=True).start()
+        self._load_pdf_pages()
     
     def _load_pdf_pages(self):
-        """
-        Loads PDF pages as images and inserts them into the Tkinter Text widget.
-        This method runs in a separate thread to prevent UI freezing.
-        """
+        """Starts a background thread to load PDF pages."""
+        Thread(target=self._load_pdf_pages_thread, daemon=True).start()
+        self._check_queue()
+    
+    def _load_pdf_pages_thread(self):
+        """Loads PDF pages as images in a background thread."""
         try:
             open_pdf = fitz.open(self.pdf_location)
             total_pages = len(open_pdf)
@@ -95,23 +91,41 @@ class tkPDFViewer(tk.Frame):
                 pix = page.get_pixmap(dpi=self.dpi)
                 mode = "RGBA" if pix.alpha else "RGB"
                 img = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
-                self.img_object_li.append(img)
-                
-                self.tkimg_object_li.append(ImageTk.PhotoImage(img))
-                
-                if self.show_loading_bar:
-                    percentage_view = (float(i + 1) / float(total_pages) * float(100))
-                    self.after(0, self._update_loading_progress, percentage_view)
-            
-            if self.tkimg_object_li:
-                self.orig_size = self.tkimg_object_li[0].width()
-            
-            self.after(0, self._display_images_in_text_widget)
-        
+                percentage = (float(i + 1) / float(total_pages) * float(100))
+                self.image_queue.put(('image', img, percentage))
+            self.image_queue.put(('done',))
         except Exception as e:
-            print(f"Error loading PDF: {e}")
-            if self.display_msg_label:
-                self.after(0, self.percentage_load_var.set, f"Error loading PDF: {e}")
+            self.image_queue.put(('error', str(e)))
+    
+    def _check_queue(self):
+        """Checks the queue for images from the background thread."""
+        try:
+            while True:
+                msg = self.image_queue.get_nowait()
+                msg_type = msg[0]
+                if msg_type == 'image':
+                    _, img, percentage = msg
+                    self.img_object_li.append(img)
+                    tk_img = ImageTk.PhotoImage(img)
+                    self.tkimg_object_li.append(tk_img)
+                    if self.show_loading_bar:
+                        self._update_loading_progress(percentage)
+                elif msg_type == 'done':
+                    if self.tkimg_object_li:
+                        self.orig_size = self.tkimg_object_li[0].width()
+                    self._display_images_in_text_widget()
+                    return
+                elif msg_type == 'error':
+                    _, error_msg = msg
+                    if self.display_msg_label:
+                        self.percentage_load_var.set(f"Error loading PDF: {error_msg}")
+                    return
+                else:
+                    raise Exception("TODO")
+                
+        except queue.Empty:
+            pass
+        self.after(50, self._check_queue)
     
     def _update_loading_progress(self, percentage):
         """Updates the loading progress bar and message on the main thread."""
@@ -121,10 +135,7 @@ class tkPDFViewer(tk.Frame):
             self.percentage_load_var.set(f"Loading {int(math.floor(percentage))}%")
     
     def _display_images_in_text_widget(self):
-        """
-        Inserts all loaded PhotoImage objects into the Text widget.
-        This must be called on the main Tkinter thread.
-        """
+        """Inserts all loaded PhotoImage objects into the Text widget."""
         if self.loading_progressbar:
             self.loading_progressbar.pack_forget()
         if self.display_msg_label:
