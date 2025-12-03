@@ -1,6 +1,6 @@
 [project]
 name = "tkpdfviewer3"
-version = "1.0.0"
+version = "1.0.1"
 description = "simple tkinter PDF viewer"
 authors = [
     { name="Jules Lagarde", email="jules.lagarde@gmail.com" },
